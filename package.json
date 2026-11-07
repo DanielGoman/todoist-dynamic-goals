@@ -1,0 +1,14 @@
+{
+  "name": "todoist-dynamic-goal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Keeps Todoist's daily goal equal to the number of tasks planned for today.",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  }
+}
