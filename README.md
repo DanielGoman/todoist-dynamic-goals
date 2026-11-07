@@ -40,3 +40,5 @@ daily goal = completed today + still open (today | overdue)
 - If `completed` always shows 0 while you have completed tasks today, the productivity-stats response shape differs from what `lib/todoist.ts → getCompletedToday` expects — check the raw output of `GET https://api.todoist.com/api/v1/tasks/completed/stats` and adjust the field names.
 - Changing goals affects streaks: a "goal met" day now means "finished everything planned".
 - To stop: remove the webhook in the App Management Console (or delete the Vercel project) and set your goal back manually.
+
+<!-- Deploy pipeline check: 2026-11-07 -->
