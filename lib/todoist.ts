@@ -138,12 +138,14 @@ export async function getCompleted(
   return { today: todayCount, week: weekCount, skippedStale };
 }
 
+export type CompletedItem = { taskId: string; completedAt: string; content: string; addedAt: string | null };
+
 /** Every task completion between two instants (recurring occurrences included). */
 export async function fetchCompletedItems(
   since: Date,
   until: Date,
-): Promise<{ taskId: string; completedAt: string; content: string }[]> {
-  const out: { taskId: string; completedAt: string; content: string }[] = [];
+): Promise<CompletedItem[]> {
+  const out: CompletedItem[] = [];
   let cursor: string | null = null;
   do {
     const params = new URLSearchParams({
@@ -158,6 +160,7 @@ export async function fetchCompletedItems(
         taskId: String(item.task_id ?? item.id),
         completedAt: String(item.completed_at),
         content: String(item.content ?? ''),
+        addedAt: item.added_at ?? item.created_at ?? null,
       });
     }
     cursor = page.next_cursor || null;

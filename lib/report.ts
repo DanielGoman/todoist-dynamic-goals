@@ -77,7 +77,20 @@ export type Report = {
   overdue: number;
   postponedOut: number;
   tasks: SlippedTask[];
+  /** Completed during the week after being postponed at least once. */
+  completedLate: CompletedLateTask[];
   historyFrom: string | null;
+};
+
+export type CompletedLateTask = {
+  id: string;
+  content: string;
+  originalDue: string;
+  completedOn: string;
+  postponed: number;
+  /** Days between the original due date and the day it was completed (0 if on time). */
+  daysLate: number;
+  partialHistory: boolean;
 };
 
 function daysBetween(a: string, b: string): number {
@@ -120,50 +133,55 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   const recurringIds = new Set(open.filter((t) => t.due?.is_recurring).map((t) => String(t.id)));
   const completed = completedItems.filter((c) => !openIds.has(c.taskId) || recurringIds.has(c.taskId)).length;
 
+  const eventsOf = (id: string) => (byTask.get(id) || []).sort((a, b) => a.at - b.at);
+  const isPartial = (events: Activity[], createdAtRaw: unknown) => {
+    const createdAt = Date.parse(String(createdAtRaw ?? ''));
+    return !events.some((e) => e.type === 'added') && !(oldestEvent !== null && createdAt >= oldestEvent);
+  };
+
   const tasks: SlippedTask[] = [];
   for (const t of open) {
     if (!t.due?.date) continue;
     const id = String(t.id);
-    const recurring = !!t.due.is_recurring;
     const currentDue = dueToLocal(String(t.due.date), tz);
-    const events = (byTask.get(id) || []).sort((a, b) => a.at - b.at);
-    const completions = events.filter((e) => e.type === 'completed').map((e) => e.at);
-
-    let baseline: string | null = null;
-    let postponed = 0;
-    for (const e of events) {
-      if (e.type === 'added') {
-        if (e.due) baseline = e.due;
-      } else if (e.type === 'completed') {
-        // A recurring task jumps to its next occurrence: start that occurrence fresh.
-        if (recurring) {
-          baseline = null;
-          postponed = 0;
-        }
-      } else if (e.lastDue !== undefined) {
-        // Completing a recurring task also logs a due-date change; that's not a postponement.
-        if (recurring && completions.some((c) => Math.abs(c - e.at) < 120_000)) continue;
-        if (baseline === null && e.lastDue) baseline = e.lastDue;
-        if (e.due && e.lastDue && e.due > e.lastDue) postponed++;
-      }
-    }
-    baseline ??= currentDue;
+    const events = eventsOf(id);
+    const h = traceHistory(events, !!t.due.is_recurring);
+    const baseline = h.baseline ?? currentDue;
     if (baseline >= today) continue;
 
-    const createdAt = Date.parse(t.added_at ?? t.created_at ?? '');
-    const hasAdded = events.some((e) => e.type === 'added');
     tasks.push({
       id,
       content: String(t.content),
       originalDue: baseline,
       currentDue,
-      postponed,
+      postponed: h.postponed,
       daysLate: daysBetween(baseline, today),
       overdue: currentDue < today,
-      partialHistory: !hasAdded && !(oldestEvent !== null && createdAt >= oldestEvent),
+      partialHistory: isPartial(events, t.added_at ?? t.created_at),
     });
   }
   tasks.sort((a, b) => b.daysLate - a.daysLate || b.postponed - a.postponed);
+
+  // Tasks completed this week that had been postponed at least once along the way.
+  const completedLate: CompletedLateTask[] = [];
+  for (const c of completedItems) {
+    const recurring = recurringIds.has(c.taskId);
+    if (openIds.has(c.taskId) && !recurring) continue; // undone since: not really completed
+    const events = eventsOf(c.taskId);
+    const h = traceHistory(events, recurring, Date.parse(c.completedAt));
+    if (!h.postponed || !h.baseline) continue;
+    const completedOn = localDate(tz, new Date(c.completedAt));
+    completedLate.push({
+      id: c.taskId,
+      content: c.content,
+      originalDue: h.baseline,
+      completedOn,
+      postponed: h.postponed,
+      daysLate: Math.max(0, daysBetween(h.baseline, completedOn)),
+      partialHistory: isPartial(events, c.addedAt),
+    });
+  }
+  completedLate.sort((a, b) => b.postponed - a.postponed || b.daysLate - a.daysLate);
 
   return {
     timezone: tz,
@@ -175,8 +193,46 @@ export async function buildReport(reportDay?: string): Promise<Report> {
     overdue: tasks.filter((t) => t.overdue).length,
     postponedOut: tasks.filter((t) => !t.overdue).length,
     tasks,
+    completedLate,
     historyFrom: oldestEvent ? localDate(tz, new Date(oldestEvent)) : null,
   };
+}
+
+/**
+ * Walks a task's activity history (sorted by time) and returns its original due date and how
+ * many times the due date was pushed later.
+ * - The original due date is the one given at creation, or the earliest one the history shows.
+ * - Moving a task to an earlier date doesn't count as a postponement.
+ * - Recurring tasks: completing an occurrence starts the next one fresh, and the automatic
+ *   date jump that comes with a completion isn't a postponement.
+ * - `until` (a completion time) stops the walk at that completion, for completed tasks.
+ */
+function traceHistory(
+  events: Activity[],
+  recurring: boolean,
+  until?: number,
+): { baseline: string | null; postponed: number } {
+  const NEAR = 120_000;
+  const completions = events.filter((e) => e.type === 'completed').map((e) => e.at);
+  let baseline: string | null = null;
+  let postponed = 0;
+  for (const e of events) {
+    if (until !== undefined && e.at > until + NEAR) break;
+    if (e.type === 'added') {
+      if (e.due) baseline = e.due;
+    } else if (e.type === 'completed') {
+      if (until !== undefined && Math.abs(e.at - until) < NEAR) break; // the completion we're measuring
+      if (recurring) {
+        baseline = null;
+        postponed = 0;
+      }
+    } else if (e.lastDue !== undefined) {
+      if (recurring && completions.some((c) => Math.abs(c - e.at) < NEAR)) continue;
+      if (baseline === null && e.lastDue) baseline = e.lastDue;
+      if (e.due && e.lastDue && e.due > e.lastDue) postponed++;
+    }
+  }
+  return { baseline, postponed };
 }
 
 // ---------- Telegram summary ----------
@@ -195,6 +251,7 @@ export function formatSummary(r: Report): string {
     `⏳ Open from this week  <b>${r.openFromWeek}</b>`,
     `🔴 Overdue now  <b>${r.overdue}</b>`,
     `➡️ Postponed past the week  <b>${r.postponedOut}</b>`,
+    `🔁 Completed after postponing  <b>${r.completedLate.length}</b>`,
   ];
   if (!r.tasks.length) lines.push('', 'Nothing slipped. 🎉');
   return lines.join('\n');
