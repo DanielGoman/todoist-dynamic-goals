@@ -36,7 +36,7 @@ daily goal = completed today + still open (today | overdue)
 
 ## Weekly report (Telegram + web page)
 
-Every Saturday around 6:00 (local time), a short Telegram summary arrives for the 7 days before,
+Every Saturday morning (cron at 04:00 UTC, so about 6:00 Israel time in winter and 7:00 in summer), a short Telegram summary arrives for the 7 days before,
 with an **Open full report** button. The page shows completed and open counts, then every slipped
 task (overdue, or postponed past the week) with how many days it is past its original due date
 and how many times it was moved. Hebrew and English titles each keep their own text direction.

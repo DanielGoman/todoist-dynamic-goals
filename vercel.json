@@ -3,7 +3,6 @@
   "rewrites": [{ "source": "/report", "destination": "/api/weekly" }],
   "crons": [
     { "path": "/api/cron/reset", "schedule": "5 22 * * *" },
-    { "path": "/api/cron/report", "schedule": "0 3 * * 6" },
     { "path": "/api/cron/report", "schedule": "0 4 * * 6" }
   ]
 }
