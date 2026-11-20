@@ -3,7 +3,8 @@ import {
   addDays,
   api,
   dueToLocal,
-  fetchCompletedItems,
+  countedCompletions,
+  fetchCompletions,
   fetchOpenTasks,
   getUser,
   localDate,
@@ -112,9 +113,9 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   const from = addDays(today, -7);
   const to = addDays(today, -1);
 
-  const [open, completedItems, added, updated, completedEvents] = await Promise.all([
+  const [open, completionEvents, added, updated, completedEvents] = await Promise.all([
     fetchOpenTasks(),
-    fetchCompletedItems(localMidnightUtc(from, tz), localMidnightUtc(today, tz)),
+    fetchCompletions(localMidnightUtc(from, tz), localMidnightUtc(today, tz), user.id, tz),
     fetchActivities('added', tz),
     fetchActivities('updated', tz),
     fetchActivities('completed', tz),
@@ -128,10 +129,15 @@ export async function buildReport(reportDay?: string): Promise<Report> {
     byTask.get(e.taskId)!.push(e);
   }
 
-  const openIds = new Set(open.map((t) => String(t.id)));
-  // Same rule as the goal: a non-recurring task that's open again isn't really completed.
-  const recurringIds = new Set(open.filter((t) => t.due?.is_recurring).map((t) => String(t.id)));
-  const completed = completedItems.filter((c) => !openIds.has(c.taskId) || recurringIds.has(c.taskId)).length;
+  // Same counting rules as the daily/weekly goal (recurring occurrences count, undone ones don't).
+  const openState = new Map(
+    open.map((t) => [
+      String(t.id),
+      { due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null, recurring: !!t.due?.is_recurring },
+    ]),
+  );
+  const { counted } = countedCompletions(completionEvents, openState);
+  const completed = counted.length;
 
   const eventsOf = (id: string) => (byTask.get(id) || []).sort((a, b) => a.at - b.at);
   const isPartial = (events: Activity[], createdAtRaw: unknown) => {
@@ -164,11 +170,9 @@ export async function buildReport(reportDay?: string): Promise<Report> {
 
   // Tasks completed this week that had been postponed at least once along the way.
   const completedLate: CompletedLateTask[] = [];
-  for (const c of completedItems) {
-    const recurring = recurringIds.has(c.taskId);
-    if (openIds.has(c.taskId) && !recurring) continue; // undone since: not really completed
+  for (const c of counted) {
     const events = eventsOf(c.taskId);
-    const h = traceHistory(events, recurring, Date.parse(c.completedAt));
+    const h = traceHistory(events, c.recurring, Date.parse(c.completedAt));
     if (!h.postponed || !h.baseline) continue;
     const completedOn = localDate(tz, new Date(c.completedAt));
     completedLate.push({

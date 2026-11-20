@@ -9,7 +9,7 @@ const today = localDate(tz);
 const weekStart = weekStartOf(today, user.startDay);
 
 const open = await getOpenDueDates(tz);
-const completed = await getCompleted(tz, today, weekStart, open.tasks);
+const completed = await getCompleted(user, today, weekStart, open.tasks);
 const dueToday = open.dates.filter((d) => d === today).length;
 
 // The old source, for comparison (this is what lagged after an undo).

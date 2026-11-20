@@ -64,6 +64,7 @@ export function dueToLocal(due: string, tz: string): string {
 // ---------- Todoist reads ----------
 
 export type User = {
+  id: string;
   timezone: string;
   dailyGoal: number;
   weeklyGoal: number;
@@ -74,6 +75,7 @@ export async function getUser(): Promise<User> {
   const data = await sync({ sync_token: '*', resource_types: JSON.stringify(['user']) });
   const u = data.user || {};
   return {
+    id: String(u.id ?? ''),
     timezone: u.tz_info?.timezone || process.env.TIMEZONE || 'Asia/Jerusalem',
     dailyGoal: Number(u.daily_goal ?? 0),
     weeklyGoal: Number(u.weekly_goal ?? 0),
@@ -105,67 +107,114 @@ export function localMidnightUtc(ymd: string, tz: string): Date {
 }
 
 /**
- * Completed counts for today and for the current week, from the actual list of completed tasks.
- *
- * Todoist can still list a task as completed for a moment after you undo it, while the
- * task already shows as open again, so it would be counted twice. A non-recurring task
- * can't be open and completed at once, so those completions are skipped. Recurring tasks
- * stay open after you complete an occurrence, so their completions always count.
+ * Completed counts for today and for the current week (the same numbers Todoist's own counter shows).
+ * See countedCompletions for the rules.
  */
 export async function getCompleted(
-  tz: string,
+  user: User,
   today: string,
   weekStart: string,
   open: Map<string, OpenTask>,
 ): Promise<{ today: number; week: number; skippedStale: number }> {
+  const tz = user.timezone;
   const since = localMidnightUtc(weekStart, tz);
-  const todayStart = localMidnightUtc(today, tz).getTime();
   const until = localMidnightUtc(addDays(today, 1), tz);
+  const todayStart = localMidnightUtc(today, tz).getTime();
 
-  let todayCount = 0;
-  let weekCount = 0;
-  let skippedStale = 0;
-  for (const item of await fetchCompletedItems(since, until)) {
-    const stillOpen = open.get(item.taskId);
-    if (stillOpen && !stillOpen.recurring) {
-      skippedStale++;
-      continue;
-    }
-    weekCount++;
-    if (Date.parse(item.completedAt) >= todayStart) todayCount++;
-  }
-
-  return { today: todayCount, week: weekCount, skippedStale };
+  const events = await fetchCompletions(since, until, user.id, tz);
+  const { counted, skipped } = countedCompletions(events, open);
+  return {
+    today: counted.filter((c) => Date.parse(c.completedAt) >= todayStart).length,
+    week: counted.length,
+    skippedStale: skipped,
+  };
 }
 
-export type CompletedItem = { taskId: string; completedAt: string; content: string; addedAt: string | null };
+export type Completion = {
+  taskId: string;
+  completedAt: string;
+  content: string;
+  addedAt: string | null;
+  recurring: boolean;
+  /** Local date of the occurrence that was completed (recurring tasks), if Todoist reports it. */
+  occurrence: string | null;
+};
 
-/** Every task completion between two instants (recurring occurrences included). */
-export async function fetchCompletedItems(
-  since: Date,
-  until: Date,
-): Promise<CompletedItem[]> {
-  const out: CompletedItem[] = [];
+/**
+ * Every completion event between two instants, from the activity log.
+ *
+ * The "completed tasks" endpoints leave out recurring tasks (they never become completed,
+ * they just move to the next date), so they undercount. The activity log has every
+ * completion, including each recurring occurrence. Only `userId`'s own completions count.
+ */
+export async function fetchCompletions(since: Date, until: Date, userId: string, tz: string): Promise<Completion[]> {
+  const out: Completion[] = [];
+  const sinceMs = since.getTime();
+  const untilMs = until.getTime();
   let cursor: string | null = null;
-  do {
-    const params = new URLSearchParams({
-      since: since.toISOString(),
-      until: until.toISOString(),
-      limit: '200',
-    });
+  // Newest first; stop once we're past `since`. Safety cap of 50 pages x 100.
+  for (let page = 0; page < 50; page++) {
+    const params = new URLSearchParams({ object_type: 'item', event_type: 'completed', limit: '100' });
+    if (userId) params.set('initiator_id', userId);
     if (cursor) params.set('cursor', cursor);
-    const page = await api(`/tasks/completed/by_completion_date?${params}`);
-    for (const item of page.items || []) {
+    const res = await api(`/activities?${params}`);
+    const list: any[] = res.results || res.events || [];
+    let reachedStart = false;
+    for (const e of list) {
+      const at = String(e.event_date ?? e.eventDate);
+      const ms = Date.parse(at);
+      if (ms < sinceMs) {
+        reachedStart = true;
+        continue;
+      }
+      if (ms >= untilMs) continue;
+      const initiator = String(e.initiator_id ?? e.initiatorId ?? '');
+      if (userId && initiator && initiator !== userId) continue;
+      const x = e.extra_data || e.extraData || {};
+      const occ = x.completed_due_date ?? x.completedDueDate;
       out.push({
-        taskId: String(item.task_id ?? item.id),
-        completedAt: String(item.completed_at),
-        content: String(item.content ?? ''),
-        addedAt: item.added_at ?? item.created_at ?? null,
+        taskId: String(e.object_id ?? e.objectId),
+        completedAt: at,
+        content: String(x.content ?? ''),
+        addedAt: x.date_added ?? x.dateAdded ?? null,
+        recurring: !!(x.is_recurring ?? x.isRecurring),
+        occurrence: occ ? dueToLocal(String(occ), tz) : null,
       });
     }
-    cursor = page.next_cursor || null;
-  } while (cursor);
+    cursor = res.next_cursor || res.nextCursor || null;
+    if (reachedStart || !cursor) break;
+  }
   return out;
+}
+
+/**
+ * Turns raw completion events into the completions that really count, matching Todoist:
+ * - Complete, undo, complete again: counts once (latest completion wins).
+ * - A non-recurring task that's open again was undone: not counted.
+ * - A recurring task counts once per occurrence. Undoing it moves it back to that same
+ *   date (logged as an edit, not an "uncomplete"), so if it's due on that date again, it's undone.
+ */
+export function countedCompletions(
+  events: Completion[],
+  open: Map<string, { due: string | null; recurring: boolean }>,
+): { counted: Completion[]; skipped: number } {
+  const latest = new Map<string, Completion>();
+  for (const c of events) {
+    const isRecurring = c.recurring || !!open.get(c.taskId)?.recurring;
+    const key = isRecurring ? `${c.taskId}|${c.occurrence ?? c.completedAt}` : c.taskId;
+    const prev = latest.get(key);
+    if (!prev || Date.parse(c.completedAt) > Date.parse(prev.completedAt)) latest.set(key, { ...c, recurring: isRecurring });
+  }
+  const counted: Completion[] = [];
+  let skipped = 0;
+  for (const c of latest.values()) {
+    const task = open.get(c.taskId);
+    const undone = c.recurring ? !!task && !!c.occurrence && task.due === c.occurrence : !!task;
+    if (undone) skipped++;
+    else counted.push(c);
+  }
+  skipped += events.length - latest.size;
+  return { counted, skipped };
 }
 
 /** Every open task, raw from the API. */
@@ -278,7 +327,7 @@ export async function recompute(opts: RecomputeOptions = {}): Promise<RecomputeR
 
   // Open tasks first: the completed count needs them to drop stale (just-undone) completions.
   const open = await getOpenDueDates(tz);
-  const completed = await getCompleted(tz, today, weekStart, open.tasks);
+  const completed = await getCompleted(user, today, weekStart, open.tasks);
   const dueDates = open.dates;
 
   const overdue = dueDates.filter((d) => d < today).length;
