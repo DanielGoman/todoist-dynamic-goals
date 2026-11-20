@@ -6,6 +6,7 @@ import {
   countedCompletions,
   fetchCompletions,
   fetchOpenTasks,
+  fetchUncompletions,
   getUser,
   localDate,
   localMidnightUtc,
@@ -113,9 +114,10 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   const from = addDays(today, -7);
   const to = addDays(today, -1);
 
-  const [open, completionEvents, added, updated, completedEvents] = await Promise.all([
+  const [open, completionEvents, undoEvents, added, updated, completedEvents] = await Promise.all([
     fetchOpenTasks(),
     fetchCompletions(localMidnightUtc(from, tz), localMidnightUtc(today, tz), user.id, tz),
+    fetchUncompletions(localMidnightUtc(from, tz), localMidnightUtc(today, tz), user.id, tz),
     fetchActivities('added', tz),
     fetchActivities('updated', tz),
     fetchActivities('completed', tz),
@@ -133,10 +135,14 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   const openState = new Map(
     open.map((t) => [
       String(t.id),
-      { due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null, recurring: !!t.due?.is_recurring },
+      {
+        due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null,
+        recurring: !!t.due?.is_recurring,
+        parentId: t.parent_id ? String(t.parent_id) : null,
+      },
     ]),
   );
-  const { counted } = countedCompletions(completionEvents, openState);
+  const { counted } = countedCompletions(completionEvents, openState, undoEvents);
   const completed = counted.length;
 
   const eventsOf = (id: string) => (byTask.get(id) || []).sort((a, b) => a.at - b.at);

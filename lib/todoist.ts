@@ -121,8 +121,11 @@ export async function getCompleted(
   const until = localMidnightUtc(addDays(today, 1), tz);
   const todayStart = localMidnightUtc(today, tz).getTime();
 
-  const events = await fetchCompletions(since, until, user.id, tz);
-  const { counted, skipped } = countedCompletions(events, open);
+  const [events, undos] = await Promise.all([
+    fetchCompletions(since, until, user.id, tz),
+    fetchUncompletions(since, until, user.id, tz),
+  ]);
+  const { counted, skipped } = countedCompletions(events, open, undos);
   return {
     today: counted.filter((c) => Date.parse(c.completedAt) >= todayStart).length,
     week: counted.length,
@@ -148,13 +151,28 @@ export type Completion = {
  * completion, including each recurring occurrence. Only `userId`'s own completions count.
  */
 export async function fetchCompletions(since: Date, until: Date, userId: string, tz: string): Promise<Completion[]> {
+  return fetchTaskEvents('completed', since, until, userId, tz);
+}
+
+/** Every "uncompleted" (undo) event between two instants: used to tell an undo from a subtask reset. */
+export function fetchUncompletions(since: Date, until: Date, userId: string, tz: string): Promise<Completion[]> {
+  return fetchTaskEvents('uncompleted', since, until, userId, tz);
+}
+
+async function fetchTaskEvents(
+  eventType: 'completed' | 'uncompleted',
+  since: Date,
+  until: Date,
+  userId: string,
+  tz: string,
+): Promise<Completion[]> {
   const out: Completion[] = [];
   const sinceMs = since.getTime();
   const untilMs = until.getTime();
   let cursor: string | null = null;
   // Newest first; stop once we're past `since`. Safety cap of 50 pages x 100.
   for (let page = 0; page < 50; page++) {
-    const params = new URLSearchParams({ object_type: 'item', event_type: 'completed', limit: '100' });
+    const params = new URLSearchParams({ object_type: 'item', event_type: eventType, limit: '100' });
     if (userId) params.set('initiator_id', userId);
     if (cursor) params.set('cursor', cursor);
     const res = await api(`/activities?${params}`);
@@ -187,16 +205,33 @@ export async function fetchCompletions(since: Date, until: Date, userId: string,
   return out;
 }
 
+export type OpenState = { due: string | null; recurring: boolean; parentId: string | null };
+
+/** True when one of the task's parents (still open) is a recurring task. */
+function hasRecurringAncestor(id: string, open: Map<string, OpenState>): boolean {
+  let parentId = open.get(id)?.parentId ?? null;
+  for (let depth = 0; parentId && depth < 10; depth++) {
+    const parent = open.get(parentId);
+    if (!parent) return false;
+    if (parent.recurring) return true;
+    parentId = parent.parentId;
+  }
+  return false;
+}
+
 /**
  * Turns raw completion events into the completions that really count, matching Todoist:
  * - Complete, undo, complete again: counts once (latest completion wins).
- * - A non-recurring task that's open again was undone: not counted.
- * - A recurring task counts once per occurrence. Undoing it moves it back to that same
- *   date (logged as an edit, not an "uncomplete"), so if it's due on that date again, it's undone.
+ * - A non-recurring task is undone if an "uncompleted" event follows its completion, or if it's
+ *   open again for no other reason. Subtasks of a recurring task are the exception: completing the
+ *   parent reopens them for the next round, and Todoist still counts their completions.
+ * - A recurring task counts once per occurrence. Undoing it moves it back to that same date
+ *   (logged as an edit, not an "uncomplete"), so if it's due on that date again, it's undone.
  */
 export function countedCompletions(
   events: Completion[],
-  open: Map<string, { due: string | null; recurring: boolean }>,
+  open: Map<string, OpenState>,
+  uncompletions: Completion[] = [],
 ): { counted: Completion[]; skipped: number } {
   const latest = new Map<string, Completion>();
   for (const c of events) {
@@ -205,11 +240,24 @@ export function countedCompletions(
     const prev = latest.get(key);
     if (!prev || Date.parse(c.completedAt) > Date.parse(prev.completedAt)) latest.set(key, { ...c, recurring: isRecurring });
   }
+  const lastUndo = new Map<string, number>();
+  for (const u of uncompletions) {
+    const ms = Date.parse(u.completedAt);
+    if (ms > (lastUndo.get(u.taskId) ?? 0)) lastUndo.set(u.taskId, ms);
+  }
+
   const counted: Completion[] = [];
   let skipped = 0;
   for (const c of latest.values()) {
     const task = open.get(c.taskId);
-    const undone = c.recurring ? !!task && !!c.occurrence && task.due === c.occurrence : !!task;
+    let undone: boolean;
+    if (c.recurring) {
+      undone = !!task && !!c.occurrence && task.due === c.occurrence;
+    } else if ((lastUndo.get(c.taskId) ?? 0) > Date.parse(c.completedAt)) {
+      undone = true;
+    } else {
+      undone = !!task && !hasRecurringAncestor(c.taskId, open);
+    }
     if (undone) skipped++;
     else counted.push(c);
   }
