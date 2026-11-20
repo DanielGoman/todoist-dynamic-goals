@@ -179,35 +179,23 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   };
 }
 
-// ---------- formatting (Telegram HTML) ----------
+// ---------- Telegram summary ----------
+// English only: task titles (often Hebrew) live on the web page, where each one gets its own
+// text direction. Mixing directions inside a Telegram message is what scrambled the layout.
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const dm = (ymd: string) => `${+ymd.slice(8, 10)}.${+ymd.slice(5, 7)}`;
 
-export function formatReport(r: Report): string {
+export function formatSummary(r: Report): string {
+  const planned = r.completed + r.openFromWeek;
+  const rate = planned ? Math.round((r.completed / planned) * 100) : 100;
   const lines = [
-    `<b>📊 Weekly report ${dm(r.from)}–${dm(r.to)}</b>`,
+    `📊 <b>Weekly report · ${dm(r.from)}–${dm(r.to)}</b>`,
     '',
-    `✅ Completed: <b>${r.completed}</b>`,
-    `⏳ Not completed (planned this week): <b>${r.openFromWeek}</b>`,
-    `📌 Not completed incl. older overdue: <b>${r.openTotal}</b>  (overdue ${r.overdue} · postponed past the week ${r.postponedOut})`,
+    `✅ Completed  <b>${r.completed}</b>  (${rate}% of this week's plan)`,
+    `⏳ Open from this week  <b>${r.openFromWeek}</b>`,
+    `🔴 Overdue now  <b>${r.overdue}</b>`,
+    `➡️ Postponed past the week  <b>${r.postponedOut}</b>`,
   ];
-  if (r.tasks.length) {
-    lines.push('', '<b>Slipped tasks</b> (days past original due date):');
-    for (const t of r.tasks) {
-      const plus = t.partialHistory ? '+' : '';
-      const parts = [
-        `${t.daysLate}${plus} day${t.daysLate === 1 ? '' : 's'} (was due ${dm(t.originalDue)})`,
-        t.postponed ? `postponed ${t.postponed}${plus}×` : null,
-        t.overdue ? 'overdue' : `now due ${dm(t.currentDue)}`,
-      ].filter(Boolean);
-      lines.push(`• <a href="https://app.todoist.com/app/task/${t.id}">${esc(t.content)}</a> — ${parts.join(' · ')}`);
-    }
-  } else {
-    lines.push('', 'Nothing slipped. 🎉');
-  }
-  if (r.tasks.some((t) => t.partialHistory)) {
-    lines.push('', `<i>+ = created before ${r.historyFrom ? dm(r.historyFrom) : 'the history window'}, which is as far back as Todoist's activity log goes, so the real numbers may be higher.</i>`);
-  }
+  if (!r.tasks.length) lines.push('', 'Nothing slipped. 🎉');
   return lines.join('\n');
 }

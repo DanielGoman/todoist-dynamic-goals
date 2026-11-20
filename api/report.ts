@@ -1,7 +1,10 @@
-// Manual report: /api/report?key=SETUP_KEY            -> preview (JSON + the message text)
+// Manual report: /api/report?key=SETUP_KEY            -> preview (JSON: summary text, page link, data)
 //                /api/report?key=SETUP_KEY&send=1     -> also send it to Telegram
 //                &date=YYYY-MM-DD                      -> build it as if run on that day (covers the 7 days before)
-import { buildReport, formatReport } from '../lib/report';
+// To see the page itself: /report?key=SETUP_KEY (or the signed link this returns).
+import { buildReport, formatSummary } from '../lib/report';
+import { reportUrl } from '../lib/sign';
+import { getUser, localDate } from '../lib/todoist';
 import { sendTelegram } from '../lib/telegram';
 
 export async function GET(request: Request): Promise<Response> {
@@ -13,11 +16,13 @@ export async function GET(request: Request): Promise<Response> {
   const date = url.searchParams.get('date') || undefined;
   if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return new Response('date must be YYYY-MM-DD', { status: 400 });
   try {
-    const report = await buildReport(date);
-    const message = formatReport(report);
+    const day = date || localDate((await getUser()).timezone);
+    const report = await buildReport(day);
+    const message = formatSummary(report);
+    const link = await reportUrl(day);
     const send = url.searchParams.get('send') === '1';
-    if (send) await sendTelegram(message);
-    return Response.json({ sent: send, message, report });
+    if (send) await sendTelegram(message, { text: 'Open full report →', url: link });
+    return Response.json({ sent: send, link, message, report });
   } catch (err) {
     return new Response(String(err), { status: 500 });
   }

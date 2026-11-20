@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [{ "source": "/report", "destination": "/api/weekly" }],
   "crons": [
     { "path": "/api/cron/reset", "schedule": "5 22 * * *" },
     { "path": "/api/cron/report", "schedule": "0 3 * * 6" },
