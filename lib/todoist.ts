@@ -9,7 +9,7 @@ function token(): string {
   return t;
 }
 
-async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token()}`, ...(init.headers || {}) },
@@ -57,7 +57,7 @@ export function weekStartOf(today: string, startDay: number): string {
 }
 
 /** A Todoist due date ("2026-11-07", "2026-11-07T10:00:00" or "...Z") as a local calendar date. */
-function dueToLocal(due: string, tz: string): string {
+export function dueToLocal(due: string, tz: string): string {
   return /[zZ]$|[+-]\d\d:\d\d$/.test(due) ? localDate(tz, new Date(due)) : due.slice(0, 10);
 }
 
@@ -82,7 +82,7 @@ export async function getUser(): Promise<User> {
 }
 
 /** UTC instant of local midnight at the start of `ymd` in `tz`. */
-function localMidnightUtc(ymd: string, tz: string): Date {
+export function localMidnightUtc(ymd: string, tz: string): Date {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     hourCycle: 'h23',
@@ -125,6 +125,25 @@ export async function getCompleted(
   let todayCount = 0;
   let weekCount = 0;
   let skippedStale = 0;
+  for (const item of await fetchCompletedItems(since, until)) {
+    const stillOpen = open.get(item.taskId);
+    if (stillOpen && !stillOpen.recurring) {
+      skippedStale++;
+      continue;
+    }
+    weekCount++;
+    if (Date.parse(item.completedAt) >= todayStart) todayCount++;
+  }
+
+  return { today: todayCount, week: weekCount, skippedStale };
+}
+
+/** Every task completion between two instants (recurring occurrences included). */
+export async function fetchCompletedItems(
+  since: Date,
+  until: Date,
+): Promise<{ taskId: string; completedAt: string; content: string }[]> {
+  const out: { taskId: string; completedAt: string; content: string }[] = [];
   let cursor: string | null = null;
   do {
     const params = new URLSearchParams({
@@ -135,19 +154,31 @@ export async function getCompleted(
     if (cursor) params.set('cursor', cursor);
     const page = await api(`/tasks/completed/by_completion_date?${params}`);
     for (const item of page.items || []) {
-      const id = String(item.task_id ?? item.id);
-      const stillOpen = open.get(id);
-      if (stillOpen && !stillOpen.recurring) {
-        skippedStale++;
-        continue;
-      }
-      weekCount++;
-      if (Date.parse(item.completed_at) >= todayStart) todayCount++;
+      out.push({
+        taskId: String(item.task_id ?? item.id),
+        completedAt: String(item.completed_at),
+        content: String(item.content ?? ''),
+      });
     }
     cursor = page.next_cursor || null;
   } while (cursor);
+  return out;
+}
 
-  return { today: todayCount, week: weekCount, skippedStale };
+/** Every open task, raw from the API. */
+export async function fetchOpenTasks(): Promise<any[]> {
+  const out: any[] = [];
+  let cursor: string | null = null;
+  do {
+    const params = new URLSearchParams({ limit: '200' });
+    if (cursor) params.set('cursor', cursor);
+    const page = await api(`/tasks?${params}`);
+    for (const t of page.results || []) {
+      if (!t.checked && !t.is_deleted) out.push(t);
+    }
+    cursor = page.next_cursor || null;
+  } while (cursor);
+  return out;
 }
 
 /**
@@ -163,21 +194,13 @@ export async function getOpenDueDates(
   tz: string,
 ): Promise<{ dates: string[]; inherited: number; tasks: Map<string, OpenTask> }> {
   const tasks = new Map<string, OpenTask>();
-  let cursor: string | null = null;
-  do {
-    const params = new URLSearchParams({ limit: '200' });
-    if (cursor) params.set('cursor', cursor);
-    const page = await api(`/tasks?${params}`);
-    for (const t of page.results || []) {
-      if (t.checked || t.is_deleted) continue;
-      tasks.set(String(t.id), {
-        parentId: t.parent_id ? String(t.parent_id) : null,
-        due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null,
-        recurring: !!t.due?.is_recurring,
-      });
-    }
-    cursor = page.next_cursor || null;
-  } while (cursor);
+  for (const t of await fetchOpenTasks()) {
+    tasks.set(String(t.id), {
+      parentId: t.parent_id ? String(t.parent_id) : null,
+      due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null,
+      recurring: !!t.due?.is_recurring,
+    });
+  }
 
   const dates: string[] = [];
   let inherited = 0;

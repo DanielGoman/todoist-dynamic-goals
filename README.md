@@ -34,6 +34,20 @@ daily goal = completed today + still open (today | overdue)
    - `https://<your-app>.vercel.app/api/recompute?key=<SETUP_KEY>` → JSON with `completed`, `remaining`, `goal`. Check the numbers match what you see in Todoist.
    - Complete a task → Vercel → Logs should show an `item:completed` line, and the widget updates.
 
+## Weekly report (Telegram)
+
+Every Saturday around 6:00 (local time), a Telegram message summarizes the 7 days before:
+completed tasks, tasks not completed, and every slipped task (overdue, or postponed past the
+week) with how many times it was postponed and how many days it is past its original due date.
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the bot token.
+2. Send any message to your new bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `result[0].message.chat.id`.
+3. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to the Vercel project's environment variables, then redeploy.
+4. Preview: `/api/report?key=<SETUP_KEY>` (add `&send=1` to send it, `&date=YYYY-MM-DD` to build it as of another day).
+
+Postponement history comes from Todoist's activity log, which only reaches back about a week on
+your plan. Numbers for tasks created before that are marked `+` (they may be higher).
+
 ## Notes
 
 - The Hobby plan allows one cron per day; its exact fire time can drift within the hour, which is fine here.
