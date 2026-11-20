@@ -81,24 +81,73 @@ export async function getUser(): Promise<User> {
   };
 }
 
-/** Completed counts for today and for the current week (same numbers Todoist's widget uses). */
+/** UTC instant of local midnight at the start of `ymd` in `tz`. */
+function localMidnightUtc(ymd: string, tz: string): Date {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const target = Date.parse(`${ymd}T00:00:00Z`);
+  let guess = target;
+  // Two passes settle the offset, including across DST changes.
+  for (let i = 0; i < 2; i++) {
+    const p = Object.fromEntries(fmt.formatToParts(new Date(guess)).map((x) => [x.type, x.value]));
+    const asIfUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+    guess += target - asIfUtc;
+  }
+  return new Date(guess);
+}
+
+/**
+ * Completed counts for today and for the current week, from the actual list of completed tasks.
+ *
+ * Todoist can still list a task as completed for a moment after you undo it, while the
+ * task already shows as open again, so it would be counted twice. A non-recurring task
+ * can't be open and completed at once, so those completions are skipped. Recurring tasks
+ * stay open after you complete an occurrence, so their completions always count.
+ */
 export async function getCompleted(
+  tz: string,
   today: string,
   weekStart: string,
-): Promise<{ today: number; week: number }> {
-  const stats = await api('/tasks/completed/stats');
-  const days: any[] = stats.days_items || [];
-  const todayCount = Number(days.find((d) => d.date === today)?.total_completed ?? 0);
+  open: Map<string, OpenTask>,
+): Promise<{ today: number; week: number; skippedStale: number }> {
+  const since = localMidnightUtc(weekStart, tz);
+  const todayStart = localMidnightUtc(today, tz).getTime();
+  const until = localMidnightUtc(addDays(today, 1), tz);
 
-  // Prefer Todoist's own weekly bucket when it lines up with our week; otherwise sum the days.
-  const weekBucket = (stats.week_items || []).find((w: any) => w.from === weekStart);
-  const weekCount = weekBucket
-    ? Number(weekBucket.total_completed ?? 0)
-    : days
-        .filter((d) => d.date >= weekStart && d.date <= today)
-        .reduce((sum, d) => sum + Number(d.total_completed ?? 0), 0);
+  let todayCount = 0;
+  let weekCount = 0;
+  let skippedStale = 0;
+  let cursor: string | null = null;
+  do {
+    const params = new URLSearchParams({
+      since: since.toISOString(),
+      until: until.toISOString(),
+      limit: '200',
+    });
+    if (cursor) params.set('cursor', cursor);
+    const page = await api(`/tasks/completed/by_completion_date?${params}`);
+    for (const item of page.items || []) {
+      const id = String(item.task_id ?? item.id);
+      const stillOpen = open.get(id);
+      if (stillOpen && !stillOpen.recurring) {
+        skippedStale++;
+        continue;
+      }
+      weekCount++;
+      if (Date.parse(item.completed_at) >= todayStart) todayCount++;
+    }
+    cursor = page.next_cursor || null;
+  } while (cursor);
 
-  return { today: todayCount, week: weekCount };
+  return { today: todayCount, week: weekCount, skippedStale };
 }
 
 /**
@@ -108,8 +157,12 @@ export async function getCompleted(
  *   (so subtasks of a task due today count as planned for today).
  * - Undated top-level tasks, and subtasks with no dated ancestor, are ignored.
  */
-export async function getOpenDueDates(tz: string): Promise<{ dates: string[]; inherited: number }> {
-  const tasks = new Map<string, { parentId: string | null; due: string | null }>();
+export type OpenTask = { parentId: string | null; due: string | null; recurring: boolean };
+
+export async function getOpenDueDates(
+  tz: string,
+): Promise<{ dates: string[]; inherited: number; tasks: Map<string, OpenTask> }> {
+  const tasks = new Map<string, OpenTask>();
   let cursor: string | null = null;
   do {
     const params = new URLSearchParams({ limit: '200' });
@@ -120,6 +173,7 @@ export async function getOpenDueDates(tz: string): Promise<{ dates: string[]; in
       tasks.set(String(t.id), {
         parentId: t.parent_id ? String(t.parent_id) : null,
         due: t.due?.date ? dueToLocal(String(t.due.date), tz) : null,
+        recurring: !!t.due?.is_recurring,
       });
     }
     cursor = page.next_cursor || null;
@@ -143,7 +197,7 @@ export async function getOpenDueDates(tz: string): Promise<{ dates: string[]; in
       parent = parent.parentId ? tasks.get(parent.parentId) : undefined;
     }
   }
-  return { dates, inherited };
+  return { dates, inherited, tasks };
 }
 
 export async function setGoals(goals: { daily_goal?: number; weekly_goal?: number }): Promise<void> {
@@ -171,6 +225,7 @@ export type RecomputeResult = {
   weekStart: string;
   includeOverdue: boolean;
   inheritedSubtasks: number;
+  skippedStaleCompletions: number;
   mode: 'ratchet' | 'live';
   daily: { completed: number; remaining: number; planned: number; previousGoal: number; goal: number; reset: boolean };
   weekly: { completed: number; remaining: number; planned: number; previousGoal: number; goal: number; reset: boolean };
@@ -195,7 +250,9 @@ export async function recompute(opts: RecomputeOptions = {}): Promise<RecomputeR
   const includeOverdue = process.env.INCLUDE_OVERDUE === 'true';
   const mode: 'ratchet' | 'live' = process.env.GOAL_MODE === 'live' ? 'live' : 'ratchet';
 
-  const [completed, open] = await Promise.all([getCompleted(today, weekStart), getOpenDueDates(tz)]);
+  // Open tasks first: the completed count needs them to drop stale (just-undone) completions.
+  const open = await getOpenDueDates(tz);
+  const completed = await getCompleted(tz, today, weekStart, open.tasks);
   const dueDates = open.dates;
 
   const overdue = dueDates.filter((d) => d < today).length;
@@ -224,6 +281,7 @@ export async function recompute(opts: RecomputeOptions = {}): Promise<RecomputeR
     weekStart,
     includeOverdue,
     inheritedSubtasks: open.inherited,
+    skippedStaleCompletions: completed.skippedStale,
     mode,
     daily: {
       completed: completed.today,
