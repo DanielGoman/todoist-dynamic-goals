@@ -1,23 +1,11 @@
 // The weekly report as a standalone web page (no external assets).
 // Every task title is an isolated bidi run (dir="auto"), so Hebrew and English titles each read
 // in their own direction while the table itself stays aligned.
-import type { CompletedLateTask, Report, SlippedTask } from './report';
+import type { CompletedLateTask, Report, SlippedTask, WeekMetrics } from './report';
+import { delta, esc, page, range, rangeShort, short } from './page';
 
-const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-const fmt = (ymd: string, opts: Intl.DateTimeFormatOptions) =>
-  new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', ...opts }).format(new Date(`${ymd}T00:00:00Z`));
 /** True when the first letter is Hebrew/Arabic, so the row's secondary line should align right too. */
-const isRtl = (text: string) => /^[^A-Za-z֐-ࣿ]*[֐-ࣿ]/.test(text);
-
-const short = (ymd: string) => fmt(ymd, { day: 'numeric', month: 'short' });
-
-function range(from: string, to: string): string {
-  const sameMonth = from.slice(0, 7) === to.slice(0, 7);
-  const start = sameMonth ? fmt(from, { day: 'numeric' }) : short(from);
-  return `${start} – ${fmt(to, { day: 'numeric', month: 'long', year: 'numeric' })}`;
-}
+const isRtl = (text: string) => /^[^A-Za-z\u0590-\u08FF]*[\u0590-\u08FF]/.test(text);
 
 /** One table row, whatever the section: the title, a secondary dates line, and the two numbers. */
 type Row = { id: string; content: string; dates: string; daysLate: number; postponed: number; partial: boolean };
@@ -78,65 +66,101 @@ function section(title: string, hint: string, tone: string, list: Row[], maxLate
   </section>`;
 }
 
-export function renderReportPage(r: Report, generatedAt: Date): string {
+export type ReportPageOptions = {
+  /** The saved report of the week before, for the change numbers. */
+  prev?: Report | null;
+  /** Neighbouring saved weeks, for the ← / → links. */
+  older?: Report | null;
+  newer?: Report | null;
+  /** When the report was saved; null when built live just now. */
+  savedAt?: string | null;
+};
+
+type Tile = { key: keyof WeekMetrics; label: string; good: 'up' | 'down' | 'neutral'; tone?: string };
+
+const TILES: Tile[] = [
+  { key: 'completed', label: 'Completed', good: 'up', tone: 'ok' },
+  { key: 'notCompleted', label: 'Not completed from this week', good: 'down', tone: 'warn' },
+  { key: 'overdue', label: 'Overdue at week end', good: 'down', tone: 'bad' },
+  { key: 'postponements', label: 'Postponements', good: 'down' },
+  { key: 'daysSlipped', label: 'Days slipped', good: 'down' },
+  { key: 'added', label: 'Tasks added', good: 'neutral' },
+];
+
+export function renderReportPage(r: Report, generatedAt: Date, opts: ReportPageOptions = {}): string {
+  const m = r.metrics;
+  const pm = opts.prev?.metrics;
   const overdue = r.tasks.filter((t) => t.overdue);
   const postponed = r.tasks.filter((t) => !t.overdue);
   const maxLate = Math.max(1, ...r.tasks.map((t) => t.daysLate), ...r.completedLate.map((t) => t.daysLate));
-  const planned = r.completed + r.openFromWeek;
-  const rate = planned ? Math.round((r.completed / planned) * 100) : 100;
-  const generated = new Intl.DateTimeFormat('en-GB', {
+  const when = new Intl.DateTimeFormat('en-GB', {
     timeZone: r.timezone,
     weekday: 'short',
     day: 'numeric',
     month: 'short',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(generatedAt);
+  }).format(opts.savedAt ? new Date(opts.savedAt) : generatedAt);
   const partial = r.tasks.some((t) => t.partialHistory) || r.completedLate.some((t) => t.partialHistory);
+  const weekLink = (w: Report | null | undefined, dir: 'older' | 'newer') =>
+    w
+      ? `<a class="week-link ${dir}" href="/report?d=${w.reportDate}">${dir === 'older' ? '← ' : ''}${rangeShort(w.from, w.to)}${dir === 'newer' ? ' →' : ''}</a>`
+      : '<span></span>';
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Weekly report · ${range(r.from, r.to)}</title>
-<style>
-  :root {
-    --bg: #f6f5f2; --card: #ffffff; --ink: #1c1c1e; --muted: #75757c; --faint: #a6a6ad;
-    --line: #e8e6e1; --track: #efede8;
-    --red: #d1453b; --amber: #c97a1c; --green: #2f8f5b;
-    color-scheme: light dark;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #121214; --card: #1b1b1e; --ink: #f2f2f4; --muted: #9a9aa2; --faint: #66666e;
-      --line: #2a2a2f; --track: #26262b;
-      --red: #ef6a5f; --amber: #e3a04a; --green: #4cbb7f;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Hebrew", Arial, sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  main { max-width: 720px; margin: 0 auto; padding: 40px 20px 56px; }
-  .eyebrow { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; }
-  h1 { margin: 6px 0 4px; font-size: 30px; line-height: 1.15; letter-spacing: -.02em; font-weight: 700; }
-  .sub { margin: 0; color: var(--faint); font-size: 13px; }
+  const tiles = TILES.map((t) => {
+    const value = m[t.key];
+    return `<div class="stat ${t.tone || ''}"><b>${value}</b><span>${t.label}</span>${delta(value, pm?.[t.key], t.good)}</div>`;
+  }).join('');
 
-  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 28px 0 12px; }
+  const status = opts.savedAt ? `Saved ${when}` : `Live as of ${when} · not saved yet`;
+
+  const body = `
+  <p class="eyebrow">Weekly report</p>
+  <h1>${range(r.from, r.to)}</h1>
+  <p class="sub">${status}${pm ? ' · changes are vs the week before' : ''}</p>
+  ${opts.older || opts.newer ? `<div class="weeks">${weekLink(opts.older, 'older')}${weekLink(opts.newer, 'newer')}</div>` : ''}
+
+  <div class="stats">${tiles}</div>
+  <div class="rate card">
+    <div class="rate-top"><span>Done out of this week's plan (${m.completed} of ${m.planned})</span><span><b>${m.completionRate}%</b> ${delta(m.completionRate, pm?.completionRate, 'up', ' pts')}</span></div>
+    <div class="track"><i style="width:${m.completionRate}%"></i></div>
+  </div>
+
+  ${
+    r.tasks.length
+      ? section('Overdue', 'Still open and past due, sorted by days past the original due date.', 'red', overdue.map(slippedRow), maxLate) +
+        section('Postponed', 'Moved past the end of the week. Original due date → current due date.', 'amber', postponed.map(slippedRow), maxLate)
+      : `<div class="empty"><b>Nothing slipped</b>Every task planned for this week got done. 🎉</div>`
+  }
+  ${section('Completed after postponing', 'Done this week, but only after the due date was pushed at least once.', 'green', r.completedLate.map(completedRow), maxLate)}
+
+  <footer>
+    <p><b>Late</b>: days past the due date the task was created with (for completed tasks, until the day it was done). <b>Moved</b>: times the due date was pushed later.</p>
+    <p><b>Days slipped</b> and <b>Postponements</b> count tasks originally due this week: still open, or completed after postponing.</p>
+    <p>${r.openTotal} open task${r.openTotal === 1 ? '' : 's'} in total are past their original due date, including ones older than this week.</p>
+    ${partial ? `<p>+ The task is older than Todoist's activity history (from ${short(r.historyFrom || r.from)}), so the real number may be higher.</p>` : ''}
+  </footer>`;
+
+  return page({ title: `Weekly report · ${range(r.from, r.to)}`, active: 'report', css: REPORT_CSS, body });
+}
+
+const REPORT_CSS = `
+  .weeks { display: flex; justify-content: space-between; margin-top: 14px; }
+  .week-link { font-size: 13px; color: var(--muted); text-decoration: none; padding: 4px 10px; border-radius: 99px; background: var(--track); }
+  .week-link:hover { color: var(--ink); }
+
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 24px 0 12px; }
   .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 12px; }
-  .stat b { display: block; font-size: 30px; line-height: 1.1; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .stat b { display: block; font-size: 30px; line-height: 1.1; font-weight: 650; letter-spacing: -.02em; }
   .stat span { display: block; margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.3; }
+  .stat .delta { margin-top: 6px; }
   .stat.ok b { color: var(--green); }
   .stat.warn b { color: var(--amber); }
   .stat.bad b { color: var(--red); }
 
-  .rate { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
-  .rate-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); }
-  .rate-top b { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .rate { padding: 14px 16px; }
+  .rate-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--muted); }
+  .rate-top b { color: var(--ink); font-size: 15px; }
   .track { height: 8px; border-radius: 99px; background: var(--track); margin-top: 10px; overflow: hidden; }
   .track i { display: block; height: 100%; border-radius: 99px; background: var(--green); }
 
@@ -171,16 +195,7 @@ export function renderReportPage(r: Report, generatedAt: Date): string {
   .moves { width: 64px; color: var(--ink); }
   .none { color: var(--faint); }
 
-  .empty { margin-top: 36px; text-align: center; padding: 40px 16px; background: var(--card);
-           border: 1px solid var(--line); border-radius: 14px; color: var(--muted); }
-  .empty b { display: block; color: var(--ink); font-size: 17px; margin-bottom: 2px; }
-
-  footer { margin-top: 32px; color: var(--faint); font-size: 12.5px; line-height: 1.6; }
-  footer p { margin: 0 0 4px; }
-
   @media (max-width: 520px) {
-    main { padding-top: 28px; }
-    h1 { font-size: 25px; }
     .stats { gap: 8px; }
     .stat { padding: 12px 12px 10px; }
     .stat b { font-size: 25px; }
@@ -188,38 +203,4 @@ export function renderReportPage(r: Report, generatedAt: Date): string {
     td, th { padding-left: 12px; padding-right: 12px; }
     .late { width: 78px; } .bar { width: 52px; } .moves { width: 54px; }
   }
-</style>
-</head>
-<body>
-<main>
-  <p class="eyebrow">Weekly report</p>
-  <h1>${range(r.from, r.to)}</h1>
-  <p class="sub">Generated ${generated}</p>
-
-  <div class="stats">
-    <div class="stat ok"><b>${r.completed}</b><span>Completed</span></div>
-    <div class="stat warn"><b>${r.openFromWeek}</b><span>Open from this week</span></div>
-    <div class="stat bad"><b>${r.overdue}</b><span>Overdue now</span></div>
-  </div>
-  <div class="rate">
-    <div class="rate-top"><span>Done out of this week's plan</span><b>${rate}%</b></div>
-    <div class="track"><i style="width:${rate}%"></i></div>
-  </div>
-
-  ${
-    r.tasks.length
-      ? section('Overdue', 'Still open and past due, sorted by days past the original due date.', 'red', overdue.map(slippedRow), maxLate) +
-        section('Postponed', 'Moved past the end of the week. Original due date → current due date.', 'amber', postponed.map(slippedRow), maxLate)
-      : `<div class="empty"><b>Nothing slipped</b>Every task planned for this week got done. 🎉</div>`
-  }
-  ${section('Completed after postponing', 'Done this week, but only after the due date was pushed at least once.', 'green', r.completedLate.map(completedRow), maxLate)}
-
-  <footer>
-    <p><b>Late</b>: days past the due date the task was created with (for completed tasks, until the day it was done). <b>Moved</b>: times the due date was pushed later.</p>
-    <p>${r.openTotal} open task${r.openTotal === 1 ? '' : 's'} in total are past their original due date, including ones older than this week.</p>
-    ${partial ? `<p>+ The task is older than Todoist's activity history (from ${short(r.historyFrom || r.from)}), so the real number may be higher.</p>` : ''}
-  </footer>
-</main>
-</body>
-</html>`;
-}
+`;

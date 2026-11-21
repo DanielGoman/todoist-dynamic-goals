@@ -2,7 +2,7 @@
 // so the Telegram message never has to carry SETUP_KEY. Links stop working after LINK_DAYS.
 const LINK_DAYS = 30;
 
-async function hmac(message: string): Promise<string> {
+export async function hmac(message: string): Promise<string> {
   const secret = process.env.CRON_SECRET;
   if (!secret) throw new Error('CRON_SECRET is not set');
   const enc = new TextEncoder();

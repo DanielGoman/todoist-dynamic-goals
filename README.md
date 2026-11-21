@@ -48,7 +48,20 @@ and how many times it was moved. Hebrew and English titles each keep their own t
 5. Send a test: `/api/report?key=<SETUP_KEY>&send=1`.
 
 The button link is signed with `CRON_SECRET` and works for 30 days, so `SETUP_KEY` never goes
-through Telegram. The page is built live when opened, so open tasks show their current state.
+through Telegram. Opening it also starts a 30-day session cookie, so you can move between pages.
+
+### Saved reports and trends
+
+Each Saturday's report is saved to a private **Vercel Blob** store (`reports/<date>.json`,
+needs `BLOB_READ_WRITE_TOKEN`, added automatically when the store is connected). The site has:
+
+- `/report`: the latest saved report (or `?d=YYYY-MM-DD` for a given week), with the change vs the week before and ← / → links.
+  A week that was never saved is built live from Todoist.
+- `/reports`: every saved week, newest first, with its headline numbers and changes.
+- `/trends`: a chart per measure across all saved weeks (planned vs completed, completion rate,
+  days slipped, postponements, overdue, completed after postponing, added vs completed), plus a table.
+
+To save a week by hand: `/api/report?key=<SETUP_KEY>&save=1` (re-saving the same day replaces it).
 
 Postponement history comes from Todoist's activity log, which only reaches back about a week on
 your plan. Numbers for tasks created before that are marked `+` (they may be higher).

@@ -18,6 +18,7 @@ type Activity = {
   taskId: string;
   type: 'added' | 'updated' | 'completed';
   at: number;
+  initiator: string;
   /** Local due date after the event (null = no due date). undefined = the event didn't touch the due date. */
   due?: string | null;
   /** Local due date before the event. Only set on updates that changed the due date. */
@@ -41,6 +42,7 @@ async function fetchActivities(eventType: Activity['type'], tz: string): Promise
         taskId: String(e.object_id ?? e.objectId),
         type: eventType,
         at: Date.parse(e.event_date ?? e.eventDate),
+        initiator: String(e.initiator_id ?? e.initiatorId ?? ''),
         due: dueRaw ? dueToLocal(String(dueRaw), tz) : dueRaw === null || hasLast ? null : undefined,
         lastDue: hasLast ? (lastRaw ? dueToLocal(String(lastRaw), tz) : null) : undefined,
       });
@@ -68,6 +70,8 @@ export type SlippedTask = {
 
 export type Report = {
   timezone: string;
+  /** The day the report was built for (the day after `to`). */
+  reportDate: string;
   /** First and last day covered (the 7 days before the report day). */
   from: string;
   to: string;
@@ -82,6 +86,29 @@ export type Report = {
   /** Completed during the week after being postponed at least once. */
   completedLate: CompletedLateTask[];
   historyFrom: string | null;
+  /** Week-level numbers for comparisons and trends (fixed when the report is saved). */
+  metrics: WeekMetrics;
+};
+
+export type WeekMetrics = {
+  /** Tasks planned for the week: completed + still open from the week. */
+  planned: number;
+  completed: number;
+  /** Completed out of planned, 0-100. */
+  completionRate: number;
+  notCompleted: number;
+  overdue: number;
+  postponedOut: number;
+  completedLate: number;
+  /** Times a due date was pushed later, across this week's slipped and late-completed tasks. */
+  postponements: number;
+  /**
+   * Days slipped: for tasks originally due this week, days past the original due date
+   * (until completion, or until the report day if still open).
+   */
+  daysSlipped: number;
+  /** Tasks you created during the week. */
+  added: number;
 };
 
 export type CompletedLateTask = {
@@ -193,8 +220,29 @@ export async function buildReport(reportDay?: string): Promise<Report> {
   }
   completedLate.sort((a, b) => b.postponed - a.postponed || b.daysLate - a.daysLate);
 
+  const fromWeek = tasks.filter((t) => t.originalDue >= from);
+  const lateThisWeek = completedLate.filter((t) => t.originalDue >= from);
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const planned = completed + fromWeek.length;
+  const weekStartMs = localMidnightUtc(from, tz).getTime();
+  const weekEndMs = localMidnightUtc(today, tz).getTime();
+  const metrics: WeekMetrics = {
+    planned,
+    completed,
+    completionRate: planned ? Math.round((completed / planned) * 100) : 100,
+    notCompleted: fromWeek.length,
+    overdue: tasks.filter((t) => t.overdue).length,
+    postponedOut: tasks.filter((t) => !t.overdue).length,
+    completedLate: completedLate.length,
+    postponements: sum(fromWeek.map((t) => t.postponed)) + sum(lateThisWeek.map((t) => t.postponed)),
+    daysSlipped: sum(fromWeek.map((t) => t.daysLate)) + sum(lateThisWeek.map((t) => t.daysLate)),
+    added: added.filter((e) => e.at >= weekStartMs && e.at < weekEndMs && (!user.id || !e.initiator || e.initiator === user.id)).length,
+  };
+
   return {
     timezone: tz,
+    reportDate: today,
+    metrics,
     from,
     to,
     completed,
